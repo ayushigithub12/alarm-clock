@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+~/.alarm_clock_data.json
