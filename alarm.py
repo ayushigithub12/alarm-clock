@@ -81,11 +81,13 @@ class AlarmClock:
             return None
 
         now = datetime.now().replace(second=0, microsecond=0)
+        # Give a 1-minute grace window so alarms set for "this minute" still fire
+        effective_now = now - timedelta(minutes=1)
 
         # Snoozed?
         if alarm.snooze_until:
             snooze_dt = datetime.fromisoformat(alarm.snooze_until)
-            if snooze_dt > now:
+            if snooze_dt > effective_now:
                 return snooze_dt
 
         h, m = self._parse_time(alarm.time_str)
@@ -93,7 +95,7 @@ class AlarmClock:
         if not alarm.repeat:
             # One-shot: fire today if not yet passed, else tomorrow
             candidate = now.replace(hour=h, minute=m)
-            if candidate <= now:
+            if candidate <= effective_now:
                 candidate += timedelta(days=1)
             return candidate
 
@@ -181,66 +183,84 @@ class AlarmClock:
 
     def watch(self):
         """Live countdown + ring when alarm fires."""
-        console.print(Panel("[bold cyan]Alarm Clock — Watch Mode[/bold cyan]\nPress [bold]Ctrl+C[/bold] to exit.", expand=False))
-
-        def render():
-            now = datetime.now()
-            text = Text()
-            text.append(f"  🕐  {now.strftime('%H:%M:%S')}  ", style="bold white")
-            text.append(f"{now.strftime('%a %d %b %Y')}\n\n", style="dim")
-
-            active = [a for a in self.alarms if a.enabled]
-            if not active:
-                text.append("  No active alarms.\n", style="dim")
-            for a in active:
-                secs = self._seconds_until(a)
-                eta = self._fmt_eta(secs) if secs is not None else "—"
-                text.append(f"  ⏰  [{a.id}] {a.label}  ", style="cyan")
-                text.append(f"{a.time_str}  ", style="bold")
-                text.append(f"→ {eta}\n", style="dim")
-            return Panel(text, title="[bold]alarm[/bold]", border_style="cyan")
+        fired_ids = set()
+        ringing = threading.Event()
 
         def check_ring():
             while True:
-                now = datetime.now().replace(second=0, microsecond=0)
-                for a in self.alarms:
+                now = datetime.now()
+                for a in list(self.alarms):
                     if not a.enabled:
                         continue
                     nf = self._next_fire(a)
-                    if nf and abs((nf - now).total_seconds()) < 30:
-                        # Check we haven't already rung this minute
+                    if nf is None:
+                        continue
+                    diff = (now - nf).total_seconds()
+                    fire_key = (a.id, nf.strftime("%Y-%m-%d %H:%M"))
+                    if 0 <= diff < 90 and fire_key not in fired_ids:
+                        fired_ids.add(fire_key)
+                        ringing.set()
                         self._ring_alarm(a)
-                        # For one-shot alarms, disable after firing
+                        ringing.clear()
                         if not a.repeat and not a.snooze_until:
                             a.enabled = False
                             self.save()
-                time.sleep(15)
+                time.sleep(5)
 
         ring_thread = threading.Thread(target=check_ring, daemon=True)
         ring_thread.start()
 
+        console.print("[bold cyan]⏰  Watch mode started — Ctrl+C to exit[/bold cyan]\n")
         try:
-            with Live(render(), refresh_per_second=1, screen=False) as live:
-                while True:
-                    live.update(render())
-                    time.sleep(1)
+            while True:
+                if not ringing.is_set():
+                    now = datetime.now()
+                    active = [a for a in self.alarms if a.enabled]
+                    # Build display lines
+                    lines = []
+                    lines.append(f"[bold white]  🕐  {now.strftime('%H:%M:%S')}[/bold white]  [dim]{now.strftime('%a %d %b %Y')}[/dim]")
+                    lines.append("")
+                    if not active:
+                        lines.append("  [dim]No active alarms.[/dim]")
+                    else:
+                        for a in active:
+                            secs = self._seconds_until(a)
+                            eta = self._fmt_eta(secs) if secs is not None else "—"
+                            lines.append(f"  [cyan]⏰  [{a.id}] {a.label}[/cyan]  [bold]{a.time_str}[/bold]  [dim]→ {eta}[/dim]")
+                    lines.append("")
+                    # Move cursor up to overwrite previous output
+                    output = "\n".join(lines)
+                    # Use ANSI escape to clear lines and reprint
+                    num_lines = len(lines)
+                    sys.stdout.write(f"\033[{num_lines}A")  # move up
+                    sys.stdout.write("\033[J")               # clear to end
+                    sys.stdout.flush()
+                    console.print(output)
+                time.sleep(1)
         except KeyboardInterrupt:
             console.print("\n[dim]Exited watch mode.[/dim]")
 
     def _ring_alarm(self, alarm: Alarm):
-        """Ring the alarm — terminal bell + visual alert."""
-        # Clear snooze
+        """Ring the alarm."""
         alarm.snooze_until = None
         self.save()
 
-        # Visual alert
-        for _ in range(3):
-            console.print(f"\a[bold red blink]🔔  ALARM! [{alarm.id}] {alarm.label}  —  {alarm.time_str}  🔔[/bold red blink]")
-            sys.stdout.write("\a")   # terminal bell
-            sys.stdout.flush()
-            time.sleep(0.6)
+        # Clear screen so ring is unmissable
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
 
-        console.print("[dim]Press Enter to dismiss, or run: alarm snooze <id>[/dim]")
+        for _ in range(5):
+            console.print()
+            console.print(f"[bold red]{"="*60}[/bold red]")
+            console.print("[bold red]  🔔  ALARM RINGING!  🔔[/bold red]")
+            console.print(f"[bold yellow]  [{alarm.id}] {alarm.label}  --  {alarm.time_str}[/bold yellow]")
+            console.print(f"[bold red]{"="*60}[/bold red]")
+            console.print()
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+            time.sleep(0.8)
+
+        console.print("[dim]Alarm done. Run: alarm snooze <id> next time.[/dim]\n")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
