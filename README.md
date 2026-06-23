@@ -86,11 +86,8 @@ The 15-second poll is a deliberate tradeoff: precise enough for a clock (alarms 
 ## Installation
 
 ```bash
-pip install rich
+pip install -r requirements.txt
 ```
-
-No other dependencies. Python 3.10+ required.
-
 ---
 
 ## Usage
